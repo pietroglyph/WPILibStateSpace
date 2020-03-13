@@ -177,10 +177,10 @@ public class ExtendedKalmanFilterTest {
         var stateStdDevs = new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.002, 0.002, 0.001);
         var withVisionEkf = new ExtendedKalmanFilter<>(Nat.N3(), Nat.N3(), Nat.N6(), f, h,
                 stateStdDevs,
-                new MatBuilder<>(Nat.N6(), Nat.N1()).fill(0.05, 0.05, 0.001, 0.05, 0.05, 0.02), false, dt);
+                new MatBuilder<>(Nat.N6(), Nat.N1()).fill(0.1, 0.1, 0.1, 0.05, 0.05, 0.02), false, dt);
         var ekf = new ExtendedKalmanFilter<N3, N3, N3>(Nat.N3(), Nat.N3(), Nat.N3(), f, (x, u) -> x,
                 stateStdDevs,
-                new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.05, 0.05, 0.001), false, dt);
+                new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.1, 0.1, 0.1), false, dt);
 
         var traj = TrajectoryGenerator.generateTrajectory(
                 List.of(
@@ -200,6 +200,10 @@ public class ExtendedKalmanFilterTest {
         List<Double> visionXs = new ArrayList<>();
         List<Double> visionYs = new ArrayList<>();
 
+        var rand = new Random();
+        final double steadyStateErrorX = 1.0;
+        final double steadyStateErrorY = 1.0;
+
         double t = 0.0;
         double lastVisionUpdate = Double.NEGATIVE_INFINITY;
         double maxError = Double.NEGATIVE_INFINITY;
@@ -216,15 +220,22 @@ public class ExtendedKalmanFilterTest {
                 u.set(2, 0,
                         groundtruthState.poseMeters.getRotation().getRadians() - lastPose.getRotation().getRadians());
             }
-            u = u.plus(StateSpaceUtils.makeWhiteNoiseVector(Nat.N3(), new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.002, 0.002, 0.001)));
+            u = u.plus(StateSpaceUtils.makeWhiteNoiseVector(Nat.N3(), new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.02, 0.02, 0.001)));
 
             var measurementRetroreflective = groundtruthState.poseMeters;
             var measurementVSlam = groundtruthState.poseMeters;
 
-            if (lastVisionUpdate + visionUpdateRate < t && groundtruthState.poseMeters.getTranslation().getX() < 54 / 2) {
+            double dist = measurementVSlam.getTranslation().getDistance(new Translation2d());
+            measurementVSlam = measurementVSlam.plus(new Transform2d(new Translation2d(steadyStateErrorX * (dist / 76.0), steadyStateErrorY * (dist / 76.0)), new Rotation2d()));
+
+            if (lastVisionUpdate + visionUpdateRate < t) {
                 lastVisionUpdate = t;
                 withVisionEkf.setP(ekf.getP());
                 withVisionEkf.setXhat(ekf.getXhat());
+
+                var measStdDevs = new MatBuilder<>(Nat.N6(), Nat.N1()).fill(dist * 0.05, dist * 0.05, dist * 0.05, 0.05, 0.05, 0.02);
+                var contR = StateSpaceUtils.makeCovMatrix(Nat.N6(), measStdDevs);
+                var discR = StateSpaceUtils.discretizeR(contR, dt);
 
                 var y = new MatBuilder<>(Nat.N6(), Nat.N1()).fill(
                         measurementVSlam.getTranslation().getX(),
@@ -235,7 +246,7 @@ public class ExtendedKalmanFilterTest {
                         measurementRetroreflective.getRotation().getRadians());
                 y = y.plus(StateSpaceUtils.makeWhiteNoiseVector(Nat.N6(), new MatBuilder<>(Nat.N6(), Nat.N1()).fill(0.05, 0.05, 0.001, 0.05, 0.05, 0.02)));
 
-                withVisionEkf.correct(u, y);
+                withVisionEkf.correct(Nat.N6(), u, y, h, discR);
                 withVisionEkf.predict(u, dt);
 
                 ekf.setP(withVisionEkf.getP());
@@ -253,7 +264,11 @@ public class ExtendedKalmanFilterTest {
                 );
                 y = y.plus(StateSpaceUtils.makeWhiteNoiseVector(Nat.N3(), new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.05, 0.05, 0.001)));
 
-                ekf.correct(u, y);
+                var measStdDevs = new MatBuilder<>(Nat.N3(), Nat.N1()).fill(dist * 0.05, dist * 0.05, dist * 0.05);
+                var contR = StateSpaceUtils.makeCovMatrix(Nat.N3(), measStdDevs);
+                var discR = StateSpaceUtils.discretizeR(contR, dt);
+
+                ekf.correct(Nat.N3(), u, y, (x, _u) -> x, discR);
                 ekf.predict(u, dt);
 
                 slamXs.add(y.get(0, 0));
@@ -279,19 +294,19 @@ public class ExtendedKalmanFilterTest {
         chartBuilder.title = "The Magic of Sensor Fusion";
         var chart = chartBuilder.build();
 
-        chart.addSeries("vSLAM", slamXs, slamYs);
-        chart.addSeries("Vision", visionXs, visionYs);
+        // chart.addSeries("vSLAM", slamXs, slamYs);
+        // chart.addSeries("Vision", visionXs, visionYs);
         chart.addSeries("Trajectory", trajXs, trajYs);
         chart.addSeries("xHat", observerXs, observerYs);
 
         System.out.println("Mean error (meters): " + errorSum / (traj.getTotalTimeSeconds() / dt));
         System.out.println("Max error (meters):  " + maxError);
 
-//        new SwingWrapper<>(chart).displayChart();
-//        try {
-//            Thread.sleep(1000000000);
-//        } catch (InterruptedException e) {
-//        }
+        new SwingWrapper<>(chart).displayChart();
+        try {
+            Thread.sleep(1000000000);
+        } catch (InterruptedException e) {
+        }
     }
 
     private Transform2d getRandomTransform(double xStdDev, double yStdDev, double thetaStdDev, Random rand) {
