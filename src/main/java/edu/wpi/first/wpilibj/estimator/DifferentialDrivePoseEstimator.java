@@ -22,7 +22,7 @@ import edu.wpi.first.wpiutil.math.numbers.N3;
  * {@link DifferentialDrivePoseEstimator#update} should be called every robot
  * loop (if your robot loops are faster than the default then you should change
  * the
- * {@link DifferentialDrivePoseEstimator#DifferentialDrivePoseEstimator(Matrix, Matrix, double)
+ * {@link DifferentialDrivePoseEstimator#DifferentialDrivePoseEstimator(Rotation2d, Pose2d, Matrix, Matrix, double)
  * nominal delta time}.)
  * {@link DifferentialDrivePoseEstimator#addVisionMeasurement} can be called as
  * infrequently as you want; if you never call it then this class will behave
