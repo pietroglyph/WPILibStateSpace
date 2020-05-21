@@ -8,11 +8,11 @@
 
 #include "drake/math/discrete_algebraic_riccati_equation.h"
 #include "edu_wpi_first_wpilibj_math_DrakeJNI.h"
-#include "wpi/jni_util.h"
+// #include "wpi/jni_util.h"
 
 #include "frc/StateSpaceUtil.h"
 
-using namespace wpi::java;
+// using namespace wpi::java;
 
 bool check_stabilizable(const Eigen::Ref<const Eigen::MatrixXd>& A,
                         const Eigen::Ref<const Eigen::MatrixXd>& B) {

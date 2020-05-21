@@ -84,8 +84,8 @@ dependencies {
   implementation "com.fasterxml.jackson.core:jackson-core:2.10.0"
   implementation "com.fasterxml.jackson.core:jackson-databind:2.10.0"
 
-  testImplementation('junit:junit:4.13')
-  testCompile "org.knowm.xchart:xchart:3.2.2"
+  // testImplementation('junit:junit:4.13')
+  // testCompile "org.knowm.xchart:xchart:3.2.2"
 }
 
 // Set up exports properly
@@ -140,7 +140,7 @@ model {
             include '**/*.cpp'
           }
           exportedHeaders {
-            srcDirs 'src/main/driver/include'
+            srcDirs 'src/main/driver/include', 'src/main/native/eigeninclude', 'build/jniinclude/compileJava'
           }
         }
       }
@@ -150,65 +150,68 @@ model {
 
     // By default, a development executable will be generated. This is to help the case of
     // testing specific functionality of the library.
-    WPILibStateSpaceDev(NativeExecutableSpec) {
-      targetBuildTypes 'debug'
-      sources {
-        cpp {
-          source {
-            srcDirs 'src/dev/native/cpp'
-            include '**/*.cpp'
-          }
-          exportedHeaders {
-            srcDir 'src/main/native/include'
-            if (project.hasProperty('generatedHeaders')) {
-              srcDir generatedHeaders
-            }
-          }
-        }
-      }
-      binaries.all {
-        lib library: 'WPILibStateSpace', linkage: 'shared'
-        lib library: 'WPILibStateSpaceDriver', linkage: 'shared'
+    // WPILibStateSpaceDev(NativeExecutableSpec) {
+    //   targetBuildTypes 'debug'
+    //   sources {
+    //     cpp {
+    //       source {
+    //         srcDirs 'src/dev/native/cpp'
+    //         include '**/*.cpp'
+    //       }
+    //       exportedHeaders {
+    //         srcDir 'src/main/native/include'
+    //         if (project.hasProperty('generatedHeaders')) {
+    //           srcDir generatedHeaders
+    //         }
+    //       }
+    //     }
+    //   }
+    //   binaries.all {
+    //     lib library: 'WPILibStateSpace', linkage: 'shared'
+    //     lib library: 'WPILibStateSpaceDriver', linkage: 'shared'
 
-        nativeUtils.useRequiredLibrary(it, "wpilib_executable_shared")
-      }
-    }
+    //     nativeUtils.useRequiredLibrary(it, "wpilib_executable_shared")
+    //   }
+    // }
   }
 
-  tasks {
-    def c = $.components
-    project.tasks.create('runCpp', Exec) {
-      group = 'WPILib'
-      description = "Run the WPILibStateSpaceDev executable"
-      def found = false
-      def systemArch = getCurrentArch()
-      c.each {
-        if (it in NativeExecutableSpec && it.name == "WPILibStateSpaceDev") {
-          it.binaries.each {
-            if (!found) {
-              def arch = it.targetPlatform.name
-              if (arch == systemArch) {
-                dependsOn it.tasks.install
-                commandLine it.tasks.install.runScriptFile.get().asFile.toString()
-                def filePath = it.tasks.install.installDirectory.get().toString() + File.separatorChar + 'lib'
-                test.dependsOn it.tasks.install
-                test.systemProperty 'java.library.path', filePath
-                test.environment 'LD_LIBRARY_PATH', filePath
-                test.workingDir filePath
+  // tasks {
+  //   def c = $.components
+  //   project.tasks.create('runCpp', Exec) {
+  //     group = 'WPILib'
+  //     description = "Run the WPILibStateSpaceDev executable"
+  //     def found = false
+  //     def systemArch = getCurrentArch()
+  //     c.each {
+  //       if (it in NativeExecutableSpec && it.name == "WPILibStateSpaceDev") {
+  //         it.binaries.each {
+  //           if (!found) {
+  //             def arch = it.targetPlatform.name
+  //             if (arch == systemArch) {
+  //               dependsOn it.tasks.install
+  //               commandLine it.tasks.install.runScriptFile.get().asFile.toString()
+  //               def filePath = it.tasks.install.installDirectory.get().toString() + File.separatorChar + 'lib'
+  //               test.dependsOn it.tasks.install
+  //               test.systemProperty 'java.library.path', filePath
+  //               test.environment 'LD_LIBRARY_PATH', filePath
+  //               test.workingDir filePath
 
-                found = true
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  //               found = true
+  //             }
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
   binaries {
     all {
       if (toolChain in VisualCpp) {
         cppCompiler.args '/bigobj'
+      }
+      if (toolChain in Gcc) {
+        linker.args '-shared'
       }
     }
   }
