@@ -1,213 +1,319 @@
+/*----------------------------------------------------------------------------*/
+/* Copyright (c) 2020 FIRST. All Rights Reserved.                             */
+/* Open Source Software - may be modified and shared by FRC teams. The code   */
+/* must be accompanied by the FIRST BSD license file in the root directory of */
+/* the project.                                                               */
+/*----------------------------------------------------------------------------*/
+
 package edu.wpi.first.wpilibj.estimator;
 
-import edu.wpi.first.wpilibj.util.Pair;
+import edu.wpi.first.wpiutil.math.Matrix;
+import edu.wpi.first.wpilibj.math.Discretization;
+import edu.wpi.first.wpilibj.math.StateSpaceUtil;
+import edu.wpi.first.wpilibj.system.NumericalJacobian;
+import edu.wpi.first.wpilibj.system.RungeKutta;
 import edu.wpi.first.wpiutil.math.*;
-import edu.wpi.first.wpilibj.math.StateSpaceUtils;
 import edu.wpi.first.wpiutil.math.numbers.N1;
-import org.ejml.dense.row.CommonOps_DDRM;
 import org.ejml.simple.SimpleMatrix;
 
 import java.util.function.BiFunction;
 
+/**
+ * A Kalman filter combines predictions from a model and measurements to give an estimate of the
+ * true ystem state. This is useful because many states cannot be measured directly as a result of
+ * sensor noise, or because the state is "hidden".
+ *
+ * <p>The Unscented Kalman filter is similar to the {@link KalmanFilter Kalman filter}, except that
+ * it propagates carefully chosen points called sigma points through the non-linear model to obtain
+ * an estimate of the true covariance (as opposed to a linearized version of it). This means that
+ * the UKF works with nonlinear systems.
+ */
+@SuppressWarnings("MemberName")
+public class UnscentedKalmanFilter<S extends Num, I extends Num,
+      O extends Num> implements KalmanTypeFilter<S, I, O> {
 
-public class UnscentedKalmanFilter<States extends Num, Inputs extends Num,
-        Outputs extends Num> {
+  private final Nat<S> m_states;
+  private final Nat<O> m_outputs;
 
-    private final BiFunction<Matrix<States, N1>, Matrix<Inputs, N1>, Matrix<States, N1>> m_f;
-    private final BiFunction<Matrix<States, N1>, Matrix<Inputs, N1>, Matrix<Outputs, N1>> m_h;
-    private final Matrix<States,States> m_Q;
-    private final Matrix<Outputs, Outputs> m_R;
-    private Matrix<States, N1> m_xHat;
-    private Matrix<States, States> m_P;
-    private Matrix m_sigmasF;
+  private final BiFunction<Matrix<S, N1>, Matrix<I, N1>, Matrix<S, N1>> m_f;
+  private final BiFunction<Matrix<S, N1>, Matrix<I, N1>, Matrix<O, N1>> m_h;
 
-    // TODO where is this initilized?
-    private MerweScaledSigmaPoints<States> m_pts;
+  private Matrix<S, N1> m_xHat;
+  private Matrix<S, S> m_P;
+  private final Matrix<S, S> m_contQ;
+  private final Matrix<O, O> m_contR;
+  private Matrix<O, O> m_discR;
+  private Matrix<?, S> m_sigmasF;
 
-    /**
-     * The states of the system.
-     */
-    private final Nat<States> states;
+  private final MerweScaledSigmaPoints<S> m_pts;
 
-    /**
-     * The inputs of the system.
-     */
-    private final Nat<Inputs> inputs;
+  /**
+   * Constructs an Unscented Kalman Filter.
+   *
+   * @param states             A Nat representing the number of states.
+   * @param outputs            A Nat representing the number of outputs.
+   * @param f                  A vector-valued function of x and u that returns
+   *                           the derivative of the state vector.
+   * @param h                  A vector-valued function of x and u that returns
+   *                           the measurement vector.
+   * @param stateStdDevs       Standard deviations of model states.
+   * @param measurementStdDevs Standard deviations of measurements.
+   * @param nominalDtSeconds   Nominal discretization timestep.
+   */
+  @SuppressWarnings("ParameterName")
+  public UnscentedKalmanFilter(Nat<S> states, Nat<O> outputs,
+                               BiFunction<Matrix<S, N1>, Matrix<I, N1>, Matrix<S, N1>> f,
+                               BiFunction<Matrix<S, N1>, Matrix<I, N1>, Matrix<O, N1>> h,
+                               Matrix<S, N1> stateStdDevs,
+                               Matrix<O, N1> measurementStdDevs,
+                               double nominalDtSeconds) {
+    this.m_states = states;
+    this.m_outputs = outputs;
 
-    /**
-     * The outputs of the system.
-     */
-    private final Nat<Outputs> outputs;
+    m_f = f;
+    m_h = h;
 
-    public UnscentedKalmanFilter(Nat<States> states, Nat<Inputs> inputs, Nat<Outputs> outputs,
-                                 BiFunction<Matrix<States, N1>, Matrix<Inputs, N1>, Matrix<States, N1>> f,
-                                 BiFunction<Matrix<States, N1>, Matrix<Inputs, N1>, Matrix<Outputs, N1>> h,
-                                 Matrix<States, N1> stateStdDevs,
-                                 Matrix<Outputs, N1> measurementStdDevs) {
-        this.states = states;
-        this.inputs = inputs;
-        this.outputs = outputs;
+    m_contQ = StateSpaceUtil.makeCovarianceMatrix(states, stateStdDevs);
+    m_contR = StateSpaceUtil.makeCovarianceMatrix(outputs, measurementStdDevs);
 
-        m_f = f;
-        m_h = h;
-        m_Q = StateSpaceUtils.makeCovMatrix(states, stateStdDevs);
-        m_R = StateSpaceUtils.makeCovMatrix(outputs, measurementStdDevs);
+    m_discR = Discretization.discretizeR(m_contR, nominalDtSeconds);
 
-        reset();
+    m_pts = new MerweScaledSigmaPoints<>(states);
+
+    reset();
+  }
+
+  @SuppressWarnings({"ParameterName", "LocalVariableName", "PMD.CyclomaticComplexity"})
+  static <S extends Num, C extends Num>
+       Pair<Matrix<C, N1>, Matrix<C, C>> unscentedTransform(
+          Nat<S> s, Nat<C> dim, Matrix<?, C> sigmas, Matrix<N1, ?> Wm, Matrix<N1, ?> Wc
+  ) {
+    if (sigmas.getNumRows() != 2 * s.getNum() + 1 || sigmas.getNumCols() != dim.getNum()) {
+      throw new IllegalArgumentException("Sigmas must be 2 * states + 1 by covDim! Got "
+            + sigmas.getNumRows() + " by " + sigmas.getNumCols());
     }
 
-    /**
-     * Resets the observer.
-     */
-    public void reset() {
-        m_xHat = new Matrix<>(new SimpleMatrix(states.getNum(), 1));
-        m_P = new Matrix<>(new SimpleMatrix(states.getNum(), states.getNum()));
+    if (Wm.getNumRows() != 1 || Wm.getNumCols() != 2 * s.getNum() + 1) {
+      throw new IllegalArgumentException("Wm must be 1 by 2 * states + 1! Got "
+            + Wm.getNumRows() + " by " + Wm.getNumCols());
     }
 
-    /**
-     * Project the model into the future with a new control input u.
-     *
-     * @param u  New control input from controller.
-     * @param dtSeconds Timestep for prediction.
-     */
-    public void predict(Matrix<Inputs, N1> u, double dtSeconds) {
-        var sigmas = m_pts.sigmaPoints(m_xHat, m_P);
-
-        for (int i = 0; i < m_pts.getNumSigns(); ++i) {
-
-            var temp = new SimpleMatrix(1, states.getNum());
-            CommonOps_DDRM.extract(sigmas.getStorage().getDDRM(), i, 0, temp.getDDRM());
-            var x = new Matrix<States, N1>(temp.transpose());
-
-            // set the block from i, 0 to i+1, States to the result of RungeKutta
-//            var rungeKutta = RungeKuttaHelper.RungeKutta(m_f, x, u, dtSeconds).transpose();
-
-//            Eigen::Matrix<double, States, 1> x =
-//                    sigmas.template block<1, States>(i, 0).transpose();
-//            m_sigmasF.template block<1, States>(i, 0) =
-//            RungeKutta(m_f, x, u, dt).transpose();
-
-        }
-
+    if (Wc.getNumRows() != 1 || Wc.getNumCols() != 2 * s.getNum() + 1) {
+      throw new IllegalArgumentException("Wc must be 1 by 2 * states + 1! Got "
+            + Wc.getNumRows() + " by " + Wc.getNumCols());
     }
 
-    /**
-     * Correct the state estimate x-hat using the measurements in y.
-     *
-     * This is useful for when the measurements available during a timestep's
-     * Correct() call vary. The h(x, u) passed to the constructor is used if one
-     * is not provided (the two-argument version of this function).
-     *
-     * @param u Same control input used in the predict step.
-     * @param y Measurement vector.
-     * @param h A vector-valued function of x and u that returns
-     *          the measurement vector.
-     * @param R Measurement noise covariance matrix.
-     */
-    public void Correct(
-      Matrix<Inputs, N1> u,
-      Matrix<Outputs, N1> y,
-      BiFunction<Matrix<States, N1>, Matrix<Inputs, N1>, Matrix<Outputs, N1>> h,
-      Matrix<Outputs, Outputs> R) {
+    // New mean is just the sum of the sigmas * weight
+    // dot = \Sigma^n_1 (W[k]*Xi[k])
+    Matrix<N1, C> x = Wm.times(changeBoundsUnchecked(sigmas));
 
-//        // Transform sigma points into measurement space
-//        Eigen::Matrix<double, 2 * States + 1, Rows> sigmasH;
-//        for (int i = 0; i < m_pts.NumSigmas(); ++i) {
-//            sigmasH.template block<1, Rows>(i, 0) =
-//            h(m_sigmasF.template block<1, States>(i, 0).transpose(), u);
-//        }
-//
-//        // Mean and covariance of prediction passed through UT
-//        var ret = UnscentedTransform<States, Rows>(sigmasH, m_pts.Wm(), m_pts.Wc(), R);
-//        Eigen::Matrix<double, Rows, 1> yHat = std::get<0>(ret);
-//        Eigen::Matrix<double, Rows, Rows> Py = std::get<1>(ret);
-//
-//        // Compute cross covariance of the state and the measurements
-//        Eigen::Matrix<double, States, Rows> Pxy;
-//        Pxy.setZero();
-//        for (int i = 0; i < m_pts.NumSigmas(); ++i) {
-//            Pxy += m_pts.Wc(i) *
-//                    (m_sigmasF.template block<1, States>(i, 0) - m_xHat.transpose())
-//                 .transpose() *
-//                    (sigmasH.template block<1, Rows>(i, 0) - yHat.transpose());
-//        }
+    // New covariance is the sum of the outer product of the residuals times the
+    // weights
+    Matrix<?, C> y = new Matrix<>(new SimpleMatrix(2 * s.getNum() + 1, dim.getNum()));
+    for (int i = 0; i < 2 * s.getNum() + 1; i++) {
+      y.setRow(i, sigmas.extractRowVector(i).minus(x));
+    }
+    Matrix<C, C> P = y.transpose().times(changeBoundsUnchecked(Wc.diag()))
+          .times(changeBoundsUnchecked(y));
 
-//        // K = P_{xy} Py^-1
-//        // K^T = P_y^T^-1 P_{xy}^T
-//        // P_y^T K^T = P_{xy}^T
-//        // K^T = P_y^T.solve(P_{xy}^T)
-//        // K = (P_y^T.solve(P_{xy}^T)^T
-//        auto K = Py.transpose().ldlt().solve(Pxy.transpose()).transpose();
-//
-//        m_xHat += K * (y - yHat);
-//        m_P -= K * Py * K.transpose();
+    return new Pair<>(x.transpose(), P);
+  }
+
+  /**
+   * Returns the error covariance matrix P.
+   *
+   * @return the error covariance matrix P.
+   */
+  @Override
+  public Matrix<S, S> getP() {
+    return m_P;
+  }
+
+  /**
+   * Returns an element of the error covariance matrix P.
+   *
+   * @param row Row of P.
+   * @param col Column of P.
+   * @return the value of the error covariance matrix P at (i, j).
+   */
+  @Override
+  public double getP(int row, int col) {
+    return m_P.get(row, col);
+  }
+
+  /**
+   * Sets the entire error covariance matrix P.
+   *
+   * @param newP The new value of P to use.
+   */
+  @Override
+  public void setP(Matrix<S, S> newP) {
+    m_P = newP;
+  }
+
+  /**
+   * Returns the state estimate x-hat.
+   *
+   * @return the state estimate x-hat.
+   */
+  @Override
+  public Matrix<S, N1> getXhat() {
+    return m_xHat;
+  }
+
+  /**
+   * Returns an element of the state estimate x-hat.
+   *
+   * @param row Row of x-hat.
+   * @return the value of the state estimate x-hat at i.
+   */
+  @Override
+  public double getXhat(int row) {
+    return m_xHat.get(row, 0);
+  }
+
+
+  /**
+   * Set initial state estimate x-hat.
+   *
+   * @param xHat The state estimate x-hat.
+   */
+  @SuppressWarnings("ParameterName")
+  @Override
+  public void setXhat(Matrix<S, N1> xHat) {
+    m_xHat = xHat;
+  }
+
+  /**
+   * Set an element of the initial state estimate x-hat.
+   *
+   * @param row   Row of x-hat.
+   * @param value Value for element of x-hat.
+   */
+  @Override
+  public void setXhat(int row, double value) {
+    m_xHat.set(row, 0, value);
+  }
+
+  /**
+   * Resets the observer.
+   */
+  @Override
+  public void reset() {
+    m_xHat = new Matrix<>(new SimpleMatrix(m_states.getNum(), 1));
+    m_P = new Matrix<>(new SimpleMatrix(m_states.getNum(), m_states.getNum()));
+    m_sigmasF = new Matrix<>(new SimpleMatrix(2 * m_states.getNum() + 1, m_states.getNum()));
+  }
+
+  /**
+   * Project the model into the future with a new control input u.
+   *
+   * @param u         New control input from controller.
+   * @param dtSeconds Timestep for prediction.
+   */
+  @SuppressWarnings({"LocalVariableName", "ParameterName"})
+  @Override
+  public void predict(Matrix<I, N1> u, double dtSeconds) {
+    // Discretize Q before projecting mean and covariance forward
+    Matrix<S, S> contA = NumericalJacobian.numericalJacobianX(m_states, m_states, m_f, m_xHat, u);
+    var discQ = Discretization.discretizeAQTaylor(contA, m_contQ, dtSeconds).getSecond();
+
+    var sigmas = m_pts.sigmaPoints(m_xHat, m_P);
+
+    for (int i = 0; i < m_pts.getNumSigmas(); ++i) {
+      Matrix<S, N1> x =
+            sigmas.extractRowVector(i).transpose();
+
+      m_sigmasF.setRow(i, RungeKutta.rungeKutta(m_f, x, u, dtSeconds).transpose());
     }
 
-    public static <S extends Num, CovDim extends Num> Pair<Matrix<N1, CovDim>, Matrix<CovDim, CovDim>> unscentedTransform(
-            S s, CovDim dim, Matrix sigmas, Matrix Wm, Matrix Wc, Matrix noiseCov
-    ) {
-        if(sigmas.getNumCols() != 2 * s.getNum() + 1 || sigmas.getNumCols() != dim.getNum())
-            throw new IllegalArgumentException("Sigmas must be 2 * states + 1 by covDim! Got "
-                    + sigmas.getNumRows() + " by " + sigmas.getNumCols());
+    var ret = unscentedTransform(m_states, m_states,
+          m_sigmasF, m_pts.getWm(), m_pts.getWc());
 
-        if(Wm.getNumRows() != 1 || Wm.getNumCols() != 2 * s.getNum() + 1)
-            throw new IllegalArgumentException("Wm must be 1 by 2 * states + 1! Got "
-                    + Wm.getNumRows() + " by " + Wm.getNumCols());
+    m_xHat = ret.getFirst();
+    m_P = ret.getSecond().plus(discQ);
+    m_discR = Discretization.discretizeR(m_contR, dtSeconds);
+  }
 
-        if(Wc.getNumRows() != 1 || Wc.getNumCols() != 2 * s.getNum() + 1)
-            throw new IllegalArgumentException("Wc must be 1 by 2 * states + 1! Got "
-                    + Wc.getNumRows() + " by " + Wc.getNumCols());
+  /**
+   * Correct the state estimate x-hat using the measurements in y.
+   *
+   * @param u Same control input used in the predict step.
+   * @param y Measurement vector.
+   */
+  @SuppressWarnings("ParameterName")
+  @Override
+  public void correct(Matrix<I, N1> u, Matrix<O, N1> y) {
+    correct(m_outputs, u, y, m_h, m_discR);
+  }
 
-        if(noiseCov.getNumRows() != dim.getNum() || noiseCov.getNumCols() != dim.getNum())
-            throw new IllegalArgumentException("noiseCov must be covDim by covDim! Got "
-                    + noiseCov.getNumRows() + " by " + noiseCov.getNumCols());
-
-//        // new mean is just the sum of the sigmas * weight
-//        // dot = \Sigma^n_1 (W[k]*Xi[k])
-//        Matrix x = Wm.times(sigmas);
-//
-//        // new covariance is the sum of the outer product of the residuals
-//        // times the weights
-//        Matrix y = new Matrix(new SimpleMatrix(2 * s.getNum() + 1, dim.getNum()));
-//        for (int i = 0; i < 2 * s.getNum() + 1; ++i) {
-//            // set the block from i, 0 to i+1, covDim
-//
-//            y.template block<1, CovDim>(i, 0) =
-//            sigmas.template block<1, CovDim>(i, 0) - x;
-//        }
-//        Matrix<CovDim, CovDim> P =
-//                y.transpose() * Eigen::DiagonalMatrix<double, 2 * States + 1>(Wc) * y;
-//
-//        P += noiseCov;
-//
-//        return std::make_tuple(x, P);
-        return null;
+  /**
+   * Correct the state estimate x-hat using the measurements in y.
+   *
+   * <p>This is useful for when the measurements available during a timestep's
+   * Correct() call vary. The h(x, u) passed to the constructor is used if one
+   * is not provided (the two-argument version of this function).
+   *
+   * @param u Same control input used in the predict step.
+   * @param y Measurement vector.
+   * @param h A vector-valued function of x and u that returns
+   *          the measurement vector.
+   * @param R Measurement noise covariance matrix.
+   */
+  @SuppressWarnings({"ParameterName", "LocalVariableName"})
+  public <R extends Num> void correct(
+          Nat<R> rows, Matrix<I, N1> u,
+          Matrix<R, N1> y,
+          BiFunction<Matrix<S, N1>, Matrix<I, N1>, Matrix<R, N1>> h,
+          Matrix<R, R> R) {
+    // Transform sigma points into measurement space
+    Matrix<?, R> sigmasH = new Matrix<>(new SimpleMatrix(2 * m_states.getNum() + 1,
+          rows.getNum()));
+    for (int i = 0; i < m_pts.getNumSigmas(); i++) {
+      Matrix<R, N1> hRet = h.apply(
+            m_sigmasF.extractRowVector(i).transpose(),
+            u
+      );
+      sigmasH.setRow(i, hRet.transpose());
     }
 
-    public static class Tuple<A, B, C> {
-        private final A m_first;
-        private final B m_second;
-        private final C m_third;
+    // Mean and covariance of prediction passed through unscented transform
+    var transRet = unscentedTransform(m_states, rows, sigmasH, m_pts.getWm(), m_pts.getWc());
+    var yHat = transRet.getFirst();
+    var Py = transRet.getSecond().plus(R);
 
-        public Tuple(A first, B second, C third) {
-            m_first = first;
-            m_second = second;
-            m_third = third;
-        }
+    // Compute cross covariance of the state and the measurements
+    Matrix<S, R> Pxy = MatrixUtils.zeros(m_states, rows);
+    for (int i = 0; i < m_pts.getNumSigmas(); i++) {
+      var temp =
+            m_sigmasF.extractRowVector(i).minus(m_xHat.transpose())
+                  .transpose()
+                  .times(
+                        sigmasH.extractRowVector(i).minus(yHat.transpose())
+                  );
 
-        public A getFirst() {
-            return m_first;
-        }
-
-        public B getSecond() {
-            return m_second;
-        }
-
-        public C getThird() {
-            return m_third;
-        }
+      Pxy = Pxy.plus(temp.times(m_pts.getWc(i)));
     }
 
+    // K = P_{xy} Py^-1
+    // K^T = P_y^T^-1 P_{xy}^T
+    // P_y^T K^T = P_{xy}^T
+    // K^T = P_y^T.solve(P_{xy}^T)
+    // K = (P_y^T.solve(P_{xy}^T)^T
+    Matrix<S, R> K = new Matrix<>(
+          Py.transpose().getStorage()
+                .solve(Pxy.transpose().getStorage())
+                .transpose()
+    );
+
+    m_xHat = m_xHat.plus(K.times(y.minus(yHat)));
+    m_P = m_P.minus(K.times(Py).times(K.transpose()));
+  }
+
+  private static <R extends Num, C extends Num>
+  Matrix<R, C> changeBoundsUnchecked(Matrix<?, ?> mat) {
+    return new Matrix<>(mat.getStorage());
+  }
 
 
 }

@@ -17,12 +17,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
 
-class KalmanFilterLatencyCompensator<S extends Num, I extends Num, O extends Num> {
+public class KalmanFilterLatencyCompensator<S extends Num, I extends Num, O extends Num> {
   private static final int k_maxPastObserverStates = 300;
 
-  private final List<Map.Entry<Double, ObserverSnapshot>> m_pastObserverSnapshots;
+  public final List<Map.Entry<Double, ObserverSnapshot>> m_pastObserverSnapshots;
 
-  KalmanFilterLatencyCompensator() {
+  public KalmanFilterLatencyCompensator() {
     m_pastObserverSnapshots = new ArrayList<>();
   }
 
